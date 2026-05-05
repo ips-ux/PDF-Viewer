@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import './index.css';
 
 // Type definitions for File System Access API
@@ -43,8 +43,16 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [editedNames, setEditedNames] = useState<Set<string>>(new Set());
   
+  const inputRef = useRef<HTMLInputElement>(null);
+  
   // Check browser support
   const isSupported = 'showDirectoryPicker' in window;
+
+  useEffect(() => {
+    if (activeFile && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [activeFile]);
 
   const sortedFiles = useMemo(() => {
     return [...files].sort((a, b) => {
@@ -130,8 +138,7 @@ function App() {
       const newUrl = URL.createObjectURL(appFile.file);
       setPreviewUrl(newUrl);
       
-      const nameWithoutExt = appFile.name.replace(/\.[^/.]+$/, "");
-      setNewName(nameWithoutExt);
+      setNewName('');
     } catch (err: any) {
       setError('Failed to display file: ' + err.message);
     }
@@ -224,8 +231,37 @@ function App() {
     }
   };
 
+  const handleSkip = () => {
+    if (!activeFile) return;
+    
+    const nextEdited = new Set(editedNames);
+    nextEdited.add(activeFile.name);
+    
+    const newSorted = [...files].sort((a, b) => {
+      const aEdited = nextEdited.has(a.name);
+      const bEdited = nextEdited.has(b.name);
+      if (aEdited && !bEdited) return 1;
+      if (!aEdited && bEdited) return -1;
+      return a.name.localeCompare(b.name);
+    });
+    
+    setEditedNames(nextEdited);
+    setNewName('');
+    
+    if (newSorted.length > 0) {
+      handleFileSelect(newSorted[0]);
+    } else {
+      clearActivePreview();
+    }
+  };
+
   const handleRename = async () => {
-    if (!activeFile || !newName.trim()) return;
+    if (!activeFile) return;
+    
+    if (!newName.trim()) {
+      handleSkip();
+      return;
+    }
     
     const newNameWithExt = `${newName.trim()}.pdf`;
     
@@ -360,8 +396,10 @@ function App() {
               <div style={{ display: 'flex', alignItems: 'center' }}>
                 <input 
                   id="rename-input"
+                  ref={inputRef}
                   type="text" 
                   className="input-field" 
+                  placeholder={activeFile.name.replace(/\.[^/.]+$/, "")}
                   value={newName} 
                   onChange={(e) => setNewName(e.target.value)}
                   onKeyDown={(e) => {
@@ -374,9 +412,9 @@ function App() {
               <button 
                 className="button-primary button-save" 
                 onClick={handleRename}
-                disabled={isRenaming || !newName.trim() || `${newName.trim()}.pdf` === activeFile.name}
+                disabled={isRenaming || (newName.trim() !== '' && `${newName.trim()}.pdf` === activeFile.name)}
               >
-                {isRenaming ? 'Renaming...' : (isSupported && activeFile.handle ? 'Save Name' : 'Download Renamed')}
+                {isRenaming ? 'Processing...' : (!newName.trim() ? 'Skip PDF' : (isSupported && activeFile.handle ? 'Save Name' : 'Download Renamed'))}
               </button>
             </div>
             
