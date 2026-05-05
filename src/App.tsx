@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import './index.css';
 
 // Type definitions for File System Access API
@@ -41,18 +41,39 @@ function App() {
   const [isRenaming, setIsRenaming] = useState(false);
   const [newName, setNewName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [editedNames, setEditedNames] = useState<Set<string>>(new Set());
+  
+  const shouldAutoSelectNext = useRef(false);
   
   // Check browser support
   const isSupported = 'showDirectoryPicker' in window;
 
+  const sortedFiles = useMemo(() => {
+    return [...files].sort((a, b) => {
+      const aEdited = editedNames.has(a.name);
+      const bEdited = editedNames.has(b.name);
+      if (aEdited && !bEdited) return 1;
+      if (!aEdited && bEdited) return -1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [files, editedNames]);
+
+  useEffect(() => {
+    if (shouldAutoSelectNext.current && sortedFiles.length > 0) {
+      handleFileSelect(sortedFiles[0]);
+      shouldAutoSelectNext.current = false;
+    }
+  }, [sortedFiles]);
+
   const handleSelectFolderNative = async () => {
     try {
       setError(null);
-      // @ts-ignore - TS doesn't have standard typings for this yet
+      // @ts-ignore
       const handle: FileSystemDirectoryHandle = await window.showDirectoryPicker({
         mode: 'readwrite'
       });
       setDirHandle(handle);
+      shouldAutoSelectNext.current = true;
       await loadFilesNative(handle);
     } catch (err: any) {
       if (err.name !== 'AbortError') {
@@ -72,18 +93,10 @@ function App() {
           pdfFiles.push({ file: fileData, name: fileData.name, handle: fileHandle });
         }
       }
-      
-      // Sort files alphabetically
-      pdfFiles.sort((a, b) => a.name.localeCompare(b.name));
-      
       setFiles(pdfFiles);
       
-      // If we had an active file, try to find it in the new list, or clear if deleted
       if (activeFile && !pdfFiles.find(f => f.name === activeFile.name)) {
         clearActivePreview();
-      } else if (!activeFile && pdfFiles.length > 0) {
-        // Auto-select first file if none selected
-        handleFileSelect(pdfFiles[0]);
       }
     } catch (err: any) {
       setError('Failed to load files: ' + err.message);
@@ -98,15 +111,9 @@ function App() {
         .filter(f => f.name.toLowerCase().endsWith('.pdf'))
         .map(f => ({ file: f, name: f.name }));
         
-      pdfs.sort((a, b) => a.name.localeCompare(b.name));
-      
       setFiles(pdfs);
+      shouldAutoSelectNext.current = true;
       
-      if (!activeFile && pdfs.length > 0) {
-        handleFileSelect(pdfs[0]);
-      }
-      
-      // Clear input value so if the user selects the same folder again it triggers
       e.target.value = '';
     } catch (err: any) {
       setError('Failed to parse selected folder: ' + err.message);
@@ -117,7 +124,6 @@ function App() {
     try {
       setActiveFile(appFile);
       
-      // Clean up previous URL
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
       }
@@ -125,7 +131,6 @@ function App() {
       const newUrl = URL.createObjectURL(appFile.file);
       setPreviewUrl(newUrl);
       
-      // Remove .pdf for the input field
       const nameWithoutExt = appFile.name.replace(/\.[^/.]+$/, "");
       setNewName(nameWithoutExt);
     } catch (err: any) {
@@ -146,25 +151,18 @@ function App() {
     if (!dirHandle || !activeFile || !activeFile.handle) return;
     
     try {
-      // 1. Create a new file
       const newFileHandle = await dirHandle.getFileHandle(newNameWithExt, { create: true });
-      
-      // 2. Stream content from old file to new file
       const writable = await newFileHandle.createWritable();
       await writable.write(activeFile.file);
       await writable.close();
       
-      // 3. Delete old file
       await dirHandle.removeEntry(activeFile.handle.name);
       
-      // Auto-select the newly created file after a short delay
-      const updatedFileHandle = await dirHandle.getFileHandle(newNameWithExt);
-      const updatedFileData = await updatedFileHandle.getFile();
+      setEditedNames(prev => new Set(prev).add(newNameWithExt));
+      shouldAutoSelectNext.current = true;
+      clearActivePreview(); // So we don't hold lock or state
       
       await loadFilesNative(dirHandle);
-      
-      handleFileSelect({ file: updatedFileData, name: updatedFileData.name, handle: updatedFileHandle });
-      
     } catch (err: any) {
       setError('Failed to rename file natively: ' + err.message);
     }
@@ -172,7 +170,6 @@ function App() {
 
   const handleRenameFallback = (newNameWithExt: string) => {
     if (!activeFile) return;
-    // Download the renamed file
     const url = URL.createObjectURL(activeFile.file);
     const a = document.createElement('a');
     a.href = url;
@@ -182,7 +179,13 @@ function App() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     
-    setError('File downloaded. Note: Due to browser limitations, you will need to manually delete the old file.');
+    setEditedNames(prev => new Set(prev).add(activeFile.name)); // Note: in fallback, name stays same in memory
+    shouldAutoSelectNext.current = true;
+    
+    setError('File downloaded. Auto-advancing to next unedited file.');
+    
+    // We force a re-trigger of auto file select by state propagation
+    setFiles(prev => [...prev]);
   };
 
   const handleRename = async () => {
@@ -190,12 +193,8 @@ function App() {
     
     const newNameWithExt = `${newName.trim()}.pdf`;
     
-    // Check if name hasn't changed
-    if (newNameWithExt === activeFile.name) {
-      return;
-    }
+    if (newNameWithExt === activeFile.name) return;
     
-    // Check if new name already exists
     if (files.some(f => f.name.toLowerCase() === newNameWithExt.toLowerCase())) {
       setError('A file with this name already exists in the folder list.');
       return;
@@ -246,27 +245,28 @@ function App() {
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
               </svg>
               Select Folder
-              {/* @ts-ignore non-standard folder attributes are sometimes not in react types */}
+              {/* @ts-ignore */}
               <input type="file" webkitdirectory="" directory="" multiple onChange={handleFallbackFolderSelect} style={{ display: 'none' }} />
             </label>
           )}
         </div>
         
         <div className="file-list">
-          {files.length === 0 && (
+          {sortedFiles.length === 0 && (
             <div className="empty-state">
               <p>No PDFs currently loaded.</p>
             </div>
           )}
           
-          {files.map(appFile => (
+          {sortedFiles.map(appFile => (
             <div 
               key={appFile.name} 
-              className={`file-item ${activeFile?.name === appFile.name ? 'active' : ''}`}
+              className={`file-item ${activeFile?.name === appFile.name ? 'active' : ''} ${editedNames.has(appFile.name) ? 'opacity-50' : ''}`}
               onClick={() => handleFileSelect(appFile)}
               title={appFile.name}
+              style={{ opacity: editedNames.has(appFile.name) ? 0.4 : 1 }}
             >
-              📄 {appFile.name}
+              📄 {appFile.name} {editedNames.has(appFile.name) && '(Edited)'}
             </div>
           ))}
         </div>
