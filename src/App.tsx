@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import './index.css';
 
 // Type definitions for File System Access API
@@ -43,8 +43,6 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [editedNames, setEditedNames] = useState<Set<string>>(new Set());
   
-  const shouldAutoSelectNext = useRef(false);
-  
   // Check browser support
   const isSupported = 'showDirectoryPicker' in window;
 
@@ -58,13 +56,6 @@ function App() {
     });
   }, [files, editedNames]);
 
-  useEffect(() => {
-    if (shouldAutoSelectNext.current && sortedFiles.length > 0) {
-      handleFileSelect(sortedFiles[0]);
-      shouldAutoSelectNext.current = false;
-    }
-  }, [sortedFiles]);
-
   const handleSelectFolderNative = async () => {
     try {
       setError(null);
@@ -73,7 +64,6 @@ function App() {
         mode: 'readwrite'
       });
       setDirHandle(handle);
-      shouldAutoSelectNext.current = true;
       await loadFilesNative(handle);
     } catch (err: any) {
       if (err.name !== 'AbortError') {
@@ -95,7 +85,10 @@ function App() {
       }
       setFiles(pdfFiles);
       
-      if (activeFile && !pdfFiles.find(f => f.name === activeFile.name)) {
+      const initialSorted = [...pdfFiles].sort((a, b) => a.name.localeCompare(b.name));
+      if (initialSorted.length > 0) {
+        handleFileSelect(initialSorted[0]);
+      } else {
         clearActivePreview();
       }
     } catch (err: any) {
@@ -112,7 +105,13 @@ function App() {
         .map(f => ({ file: f, name: f.name }));
         
       setFiles(pdfs);
-      shouldAutoSelectNext.current = true;
+      
+      const initialSorted = [...pdfs].sort((a, b) => a.name.localeCompare(b.name));
+      if (initialSorted.length > 0) {
+        handleFileSelect(initialSorted[0]);
+      } else {
+        clearActivePreview();
+      }
       
       e.target.value = '';
     } catch (err: any) {
@@ -158,11 +157,36 @@ function App() {
       
       await dirHandle.removeEntry(activeFile.handle.name);
       
-      setEditedNames(prev => new Set(prev).add(newNameWithExt));
-      shouldAutoSelectNext.current = true;
-      clearActivePreview(); // So we don't hold lock or state
+      // 1. Manually build the new file list from directory
+      const pdfFiles: AppFile[] = [];
+      // @ts-ignore
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.pdf')) {
+          const fileHandle = entry as FileSystemFileHandle;
+          const fileData = await fileHandle.getFile();
+          pdfFiles.push({ file: fileData, name: fileData.name, handle: fileHandle });
+        }
+      }
       
-      await loadFilesNative(dirHandle);
+      const nextEdited = new Set(editedNames);
+      nextEdited.add(newNameWithExt);
+      
+      const newSorted = [...pdfFiles].sort((a, b) => {
+        const aEdited = nextEdited.has(a.name);
+        const bEdited = nextEdited.has(b.name);
+        if (aEdited && !bEdited) return 1;
+        if (!aEdited && bEdited) return -1;
+        return a.name.localeCompare(b.name);
+      });
+      
+      setEditedNames(nextEdited);
+      setFiles(pdfFiles);
+      if (newSorted.length > 0) {
+        handleFileSelect(newSorted[0]);
+      } else {
+        clearActivePreview();
+      }
+      
     } catch (err: any) {
       setError('Failed to rename file natively: ' + err.message);
     }
@@ -179,13 +203,25 @@ function App() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     
-    setEditedNames(prev => new Set(prev).add(activeFile.name)); // Note: in fallback, name stays same in memory
-    shouldAutoSelectNext.current = true;
+    const nextEdited = new Set(editedNames);
+    nextEdited.add(activeFile.name);
     
+    const newSorted = [...files].sort((a, b) => {
+      const aEdited = nextEdited.has(a.name);
+      const bEdited = nextEdited.has(b.name);
+      if (aEdited && !bEdited) return 1;
+      if (!aEdited && bEdited) return -1;
+      return a.name.localeCompare(b.name);
+    });
+    
+    setEditedNames(nextEdited);
     setError('File downloaded. Auto-advancing to next unedited file.');
     
-    // We force a re-trigger of auto file select by state propagation
-    setFiles(prev => [...prev]);
+    if (newSorted.length > 0) {
+      handleFileSelect(newSorted[0]);
+    } else {
+      clearActivePreview();
+    }
   };
 
   const handleRename = async () => {
